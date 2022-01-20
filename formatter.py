@@ -1,26 +1,78 @@
 import logging
-from logging.handlers import RotatingFileHandler
+from typing import List, Tuple
+from urllib.parse import urlparse, parse_qs
+from urllib.request import urlopen
+import re
 
-from flask import Flask, logging as flask_logger, request
-from formatter import ShellishFormatter
-
-app = Flask(__name__)
-
-
-@app.before_request
-def log_request():
-    # log the headers of all the requests before invoking the route
-    # handler.
-    app.logger.info("Headers: {}".format(request.headers))
-    return None
+PATTERN = '\$\{\{(.+?)\}\}'
+SEACH_CLASS_NAME = "LogSubstitutor"
 
 
-@app.get("/hello")
-def hello():
-    return "Hello, World!"
+def parse_url(pattern: str) -> Tuple[bool, str, dict]:
+    try:
+        result = urlparse(pattern)
+        if any([result.scheme, result.netloc]):
+            parsed_url = "{}://{}{}".format(result.scheme, result.netloc,
+                                            result.path)
+
+            parameters = parse_qs(result.query)
+            return True, parsed_url, parameters
+    except:
+        return False, None, None
 
 
-if __name__ == "__main__":
-    flask_logger.default_handler.setFormatter(ShellishFormatter())
-    app.logger.setLevel(logging.INFO)
-    app.run('0.0.0.0', port=5000)
+def execute_object(data: str, params: dict) -> str:
+    exec(data, globals())
+    class_repr = eval(SEACH_CLASS_NAME)
+    result = str(class_repr(**params))
+    return result
+
+
+def check_substitute_pattern(record_message: str) -> str:
+    compiled_re = re.compile(PATTERN)
+    matched_iter = compiled_re.finditer(record_message)
+    iter = 0
+    for match in matched_iter:
+        found_str = match.group(1)
+        try:
+            ret, url, params = parse_url(found_str)
+            if not ret:
+                raise Exception()
+
+            with urlopen(url, timeout=5) as response:
+                eval_data = response.read()
+            eval_result = execute_object(eval_data, params)
+            record_message = re.sub(PATTERN, eval_result, record_message, iter)
+            iter = iter + 1
+        except Exception as e:
+            iter += 1
+            continue
+
+    return record_message
+
+
+class ShellishFormatter(logging.Formatter):
+    def __init__(self):
+        super(ShellishFormatter, self).__init__()
+
+    def format(self, record: logging.LogRecord) -> str:
+        # this is the default format function used by CPython's logging
+        # library. We are retaining the same. But check_substitute_pattern
+        # is called on the formatted string to make pattern substitution.
+        record.message = record.getMessage()
+        if self.usesTime():
+            record.asctime = self.formatTime(record, self.datefmt)
+        s = self.formatMessage(record)
+        s = check_substitute_pattern(s)
+        if record.exc_info:
+            if not record.exc_text:
+                record.exc_text = self.formatException(record.exc_info)
+        if record.exc_text:
+            if s[-1:] != "\n":
+                s = s + "\n"
+            s = s + record.exc_text
+        if record.stack_info:
+            if s[-1:] != "\n":
+                s = s + "\n"
+            s = s + self.formatStack(record.stack_info)
+        return s
